@@ -4010,7 +4010,9 @@ def _test_gremlin(
         )
 
 
-def _write_html_report(score: MutationScore, rootdir: Path, html_dir: Path | None = None) -> Path:
+def _write_html_report(
+    score: MutationScore, rootdir: Path, html_dir: Path | None = None, *, skipped_files: dict[str, str] | None = None
+) -> Path:
     """Write HTML report to file.
 
     Args:
@@ -4018,22 +4020,24 @@ def _write_html_report(score: MutationScore, rootdir: Path, html_dir: Path | Non
         rootdir: Root directory of the project.
         html_dir: Custom output directory, or ``None`` for the default
             ``<rootdir>/coverage/gremlins/`` location.
+        skipped_files: Paths and reasons for files that could not be instrumented.
 
     Returns:
         Path to the written HTML report.
     """
     reporter = HtmlReporter()
     output_path = resolve_html_output_path(rootdir=rootdir, html_dir=html_dir)
-    reporter.write_report(score, output_path)
+    reporter.write_report(score, output_path, skipped_files=skipped_files)
     return output_path
 
 
-def _write_json_report(score: MutationScore, rootdir: Path) -> Path:
+def _write_json_report(score: MutationScore, rootdir: Path, *, skipped_files: dict[str, str] | None = None) -> Path:
     """Write JSON report to file.
 
     Args:
         score: The MutationScore to write.
         rootdir: Root directory of the project.
+        skipped_files: Paths and reasons for files that could not be instrumented.
 
     Returns:
         Path to the written JSON report.
@@ -4042,7 +4046,7 @@ def _write_json_report(score: MutationScore, rootdir: Path) -> Path:
     # TODO(#308): add --gremlins-json-path flag for parity with --gremlins-html-dir
     output_path = rootdir / 'coverage' / 'gremlins' / 'gremlins.json'
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    reporter.write_report(score, output_path)
+    reporter.write_report(score, output_path, skipped_files=skipped_files)
     return output_path
 
 
@@ -4103,7 +4107,9 @@ def pytest_terminal_summary(  # noqa: C901, PLR0912, PLR0915
         raw_html_dir = config.getoption('gremlins_html_dir', default=None)
         html_dir = Path(raw_html_dir) if raw_html_dir is not None else None
         try:
-            report_path = _write_html_report(score, rootdir=rootdir, html_dir=html_dir)
+            report_path = _write_html_report(
+                score, rootdir=rootdir, html_dir=html_dir, skipped_files=gremlin_session.skipped_files
+            )
             terminalreporter.write_line(f'HTML report written to: {report_path}')
         except OSError as exc:
             logger.warning('Failed to write HTML report: %s', exc)
@@ -4111,7 +4117,7 @@ def pytest_terminal_summary(  # noqa: C901, PLR0912, PLR0915
 
     if 'json' in gremlin_session.report_formats:
         try:
-            json_path = _write_json_report(score, rootdir=rootdir)
+            json_path = _write_json_report(score, rootdir=rootdir, skipped_files=gremlin_session.skipped_files)
             terminalreporter.write_line(f'JSON report written to: {json_path}')
         except OSError as exc:
             logger.warning('Failed to write JSON report: %s', exc)

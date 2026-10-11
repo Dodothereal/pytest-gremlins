@@ -39,6 +39,7 @@ class JsonReporter:
                 "auth.py": {"total": 5, "zapped": 4, "survived": 1, "percentage": 80.0},
                 "utils.py": {"total": 5, "zapped": 4, "survived": 1, "percentage": 80.0}
             },
+            "skipped_files": {"src/broken.py": "<reason>"},  # omitted when empty
             "results": [
                 {
                     "gremlin_id": "g001",
@@ -54,26 +55,32 @@ class JsonReporter:
         }
     """
 
-    def to_json(self, score: MutationScore) -> str:
+    def to_json(self, score: MutationScore, *, skipped_files: dict[str, str] | None = None) -> str:
         """Convert mutation score to JSON string.
 
         Args:
             score: The MutationScore to convert.
+            skipped_files: Paths and reasons for files that could not be instrumented.
 
         Returns:
             Pretty-printed JSON string.
         """
         data = self._build_report_data(score)
+        if skipped_files:
+            data['skipped_files'] = skipped_files
         return json.dumps(data, indent=2)
 
-    def write_report(self, score: MutationScore, output_path: Path) -> None:
+    def write_report(
+        self, score: MutationScore, output_path: Path, *, skipped_files: dict[str, str] | None = None
+    ) -> None:
         """Write mutation report to a JSON file.
 
         Args:
             score: The MutationScore to write.
             output_path: Path to the output JSON file.
+            skipped_files: Paths and reasons for files that could not be instrumented.
         """
-        output_path.write_text(self.to_json(score))
+        output_path.write_text(self.to_json(score, skipped_files=skipped_files))
 
     def _build_report_data(self, score: MutationScore) -> JsonReport:
         """Build the complete report data structure.

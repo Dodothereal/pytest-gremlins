@@ -33,6 +33,18 @@ class DescribeJsonReporterOutput:
         parsed = json.loads(json_str)
         assert isinstance(parsed, dict)
 
+    def it_includes_skipped_paths_and_reasons(self):
+        score = MutationScore.from_results([])
+        skipped = {'src/broken.py': 'RecursionError: maximum recursion depth exceeded'}
+
+        assert json.loads(JsonReporter().to_json(score, skipped_files=skipped))['skipped_files'] == skipped
+
+    @pytest.mark.parametrize('skipped_files', [None, {}])
+    def it_omits_skipped_files_when_none_were_skipped(self, skipped_files):
+        score = MutationScore.from_results([])
+
+        assert 'skipped_files' not in json.loads(JsonReporter().to_json(score, skipped_files=skipped_files))
+
     def it_includes_summary_section(self, make_result):
         results = [
             make_result(GremlinResultStatus.ZAPPED),

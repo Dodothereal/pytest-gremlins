@@ -151,6 +151,7 @@ class JsonReport(TypedDict):
     summary: JsonSummary
     files: dict[str, JsonFileStats]
     results: list[JsonResultEntry]
+    skipped_files: NotRequired[dict[str, str]]
     timeout_warning: NotRequired[JsonTimeoutWarning]
 
 
