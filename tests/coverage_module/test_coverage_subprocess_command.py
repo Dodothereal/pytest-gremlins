@@ -226,9 +226,11 @@ class DescribeRunTestsWithCoverageXdistStripping:
             _run_tests_with_coverage([], tmp_path)
 
         env = run.call_args.kwargs['env']
-        sentinel = env['GREMLIN_SENTINEL']
+        sentinel = env.get('GREMLIN_SENTINEL')
+        has_coverage_core = 'COVERAGE_CORE' in env
+        del env  # --showlocals must not display the subprocess environment.
         assert sentinel == 'kept'
-        assert 'COVERAGE_CORE' not in env
+        assert not has_coverage_core
 
 
 @pytest.mark.small
@@ -243,14 +245,17 @@ class DescribePrescanEnv:
 
         env = _prescan_env()
 
-        assert 'PYTEST_ADDOPTS' not in env
+        has_addopts = 'PYTEST_ADDOPTS' in env
+        del env  # --showlocals must not display the subprocess environment.
+        assert not has_addopts
 
     def it_keeps_the_non_xdist_options_in_pytest_addopts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('PYTEST_ADDOPTS', '-n 4 --import-mode=importlib -ra')
 
         env = _prescan_env()
 
-        kept = env['PYTEST_ADDOPTS']
+        kept = env.get('PYTEST_ADDOPTS')
+        del env
         assert kept == '--import-mode=importlib -ra'
 
     def it_leaves_other_variables_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -259,9 +264,11 @@ class DescribePrescanEnv:
 
         env = _prescan_env()
 
-        sentinel = env['GREMLIN_SENTINEL']
+        sentinel = env.get('GREMLIN_SENTINEL')
+        has_addopts = 'PYTEST_ADDOPTS' in env
+        del env  # --showlocals must not display the subprocess environment.
         assert sentinel == 'kept'
-        assert 'PYTEST_ADDOPTS' not in env
+        assert not has_addopts
 
 
 class _RecordingOptionGroup:

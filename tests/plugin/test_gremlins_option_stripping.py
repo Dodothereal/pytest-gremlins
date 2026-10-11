@@ -85,4 +85,7 @@ class DescribePrescanEnv:
     def it_drops_pytest_addopts_when_only_gremlins_options_were_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('PYTEST_ADDOPTS', '--gremlin-report=json --gremlin-workers 4')
 
-        assert 'PYTEST_ADDOPTS' not in _prescan_env()
+        env = _prescan_env()
+        has_addopts = 'PYTEST_ADDOPTS' in env
+        del env  # --showlocals must not display the subprocess environment.
+        assert not has_addopts

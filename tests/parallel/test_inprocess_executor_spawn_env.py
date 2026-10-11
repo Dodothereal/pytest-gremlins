@@ -75,7 +75,9 @@ class DescribeInProcessExecutorExportsTheSpawnEnvironment:
     def it_restores_the_environment_afterwards(self, recorded_environments: RecordedEnvironments) -> None:
         _execute_gremlins(['g001'])
 
-        assert (len(recorded_environments), os.environ.get('ACTIVE_GREMLIN'), os.environ['PYTHONPATH']) == (
+        active_gremlin = os.environ.get('ACTIVE_GREMLIN')
+        pythonpath = os.environ['PYTHONPATH']
+        assert (len(recorded_environments), active_gremlin, pythonpath) == (
             1,
             None,
             '/users/path',

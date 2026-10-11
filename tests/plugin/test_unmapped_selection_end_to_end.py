@@ -33,7 +33,8 @@ import os
 
 
 def test_unrelated():
-    assert 'ACTIVE_GREMLIN' not in os.environ
+    active_gremlin = 'ACTIVE_GREMLIN' in os.environ
+    assert not active_gremlin
 """
 
 _RECORD_TESTS_RUN_UNDER_A_GREMLIN = """
