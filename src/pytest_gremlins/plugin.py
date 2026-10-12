@@ -121,6 +121,11 @@ from pytest_gremlins.reporting.results import (
     GremlinResultStatus,
 )
 from pytest_gremlins.reporting.score import MutationScore
+from pytest_gremlins.rerun_options import (
+    baseline_rerun_warning,
+    rerun_ini_overrides,
+    rerun_options_in,
+)
 from pytest_gremlins.xdist_options import (
     addopts_without_xdist,
     env_without_xdist_addopts,
@@ -341,6 +346,8 @@ class GremlinSession:
     unrunnable_gremlin_ids: set[str] = field(default_factory=set)
     explain_gremlin_id: str | None = None
     preserved_addopts: str = ''
+    rerun_options: list[str] = field(default_factory=list)
+    baseline_rerun_test_ids: set[str] = field(default_factory=set)
     coverage_timeout: int = DEFAULT_COVERAGE_TIMEOUT_SECONDS
     mutant_timeout: int = DEFAULT_MUTANT_TIMEOUT_SECONDS
     collection_errors: int = 0
@@ -515,8 +522,12 @@ class _BaselineRecorder:
         phase (for example call and teardown) and must still count once.
         """
         gremlin_session = self._enabled_session()
-        if gremlin_session is not None and report.failed:
+        if gremlin_session is None:
+            return
+        if report.failed:
             gremlin_session.baseline_failed_test_ids.add(report.nodeid)
+        elif str(report.outcome) == 'rerun':  # pytest-rerunfailures' outcome is not in pytest's Literal
+            gremlin_session.baseline_rerun_test_ids.add(report.nodeid)
 
     def pytest_keyboard_interrupt(self, excinfo: pytest.ExceptionInfo[BaseException]) -> None:  # noqa: ARG002
         """Record that the baseline session was cut short (``pytest.exit`` or Ctrl-C).
@@ -1052,6 +1063,7 @@ def pytest_configure(config: pytest.Config) -> None:
             xdist_loaded=config.pluginmanager.hasplugin('xdist'),
             xdist_workers=xdist_worker_int if xdist_active else None,
             preserved_addopts=_addopts_without_cov(config.getini('addopts')),
+            rerun_options=_rerun_options_for(config),
             coverage_timeout=coverage_timeout,
             mutant_timeout=merged_config.mutant_timeout or DEFAULT_MUTANT_TIMEOUT_SECONDS,
         ),
@@ -2127,6 +2139,7 @@ def _unmutated_command_and_env(gremlin_session: GremlinSession, rootdir: Path) -
         instrumented_dir,
         gremlin_session.preserved_addopts,
         xdist_loaded=gremlin_session.xdist_loaded,
+        rerun_options=gremlin_session.rerun_options,
     )
     env = env_without_xdist_addopts(os.environ)
     env.pop(ACTIVE_GREMLIN_ENV_VAR, None)
@@ -2423,6 +2436,9 @@ def _skip_mutation_unless_baseline_is_green(gremlin_session: GremlinSession, exi
     if _is_green_baseline(gremlin_session, exitstatus):
         if exitstatus == pytest.ExitCode.TESTS_FAILED:
             print(_NON_TEST_CHECK_NOTE, file=sys.stderr)
+        rerun_warning = baseline_rerun_warning(gremlin_session.baseline_rerun_test_ids)
+        if rerun_warning is not None:
+            print(rerun_warning, file=sys.stderr)
         return False
     reason = _baseline_skip_reason(gremlin_session, exitstatus)
     print(f'pytest-gremlins: skipping mutation testing because {reason}', file=sys.stderr)
@@ -2552,6 +2568,7 @@ def _run_prescan_reporting_problems(
             name_to_node_ids=gremlin_session.test_name_to_node_ids,
             coverage_include=coverage_include,
             preserved_addopts=gremlin_session.preserved_addopts,
+            rerun_options=gremlin_session.rerun_options,
             timeout=gremlin_session.coverage_timeout,
         )
     except CoveragePrescanTimeoutError as timeout_error:
@@ -2695,6 +2712,26 @@ def _is_cov_addopt(token: str) -> bool:
     return name in ('--cov', '--no-cov') or name.startswith(('--cov-', '--no-cov-'))
 
 
+# Registered as ``rerunfailures`` when found through its entry point, as ``pytest_rerunfailures`` when loaded
+# by module name (``-p``, ``pytest_plugins``, or ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1``).
+_RERUNFAILURES_PLUGIN_NAMES = ('rerunfailures', 'pytest_rerunfailures')
+
+
+def _rerun_options_for(config: pytest.Config) -> list[str]:
+    """Return the rerun settings of ``config`` for gremlin runs, or none if pytest-rerunfailures is not active.
+
+    That is the rerun ini settings the main session resolved (so a ``-c`` file reaches the gremlin runs,
+    which never read it) followed by the rerun options typed on the command line, which win over them.
+    Settings are only forwarded when the plugin is loaded in this session, so a project without it
+    never receives a flag its gremlin runs would reject as unrecognized (exit code 4).
+    """
+    if not any(config.pluginmanager.hasplugin(name) for name in _RERUNFAILURES_PLUGIN_NAMES):
+        return []
+    command_line_options = rerun_options_in(config.invocation_params.args, base_dir=config.invocation_params.dir)
+    ini_overrides = rerun_ini_overrides(config.getini, overridden_by=command_line_options)
+    return [*ini_overrides, *command_line_options]
+
+
 def _addopts_without_cov(raw_addopts: list[str]) -> str:
     """Return the project's pytest ``addopts`` with pytest-cov options removed.
 
@@ -2797,6 +2834,7 @@ def _run_tests_with_coverage(
     name_to_node_ids: dict[str, list[str]] | None = None,
     coverage_include: list[str] | None = None,
     preserved_addopts: str = '',
+    rerun_options: Sequence[str] = (),
     timeout: int = DEFAULT_COVERAGE_TIMEOUT_SECONDS,
 ) -> dict[str, dict[str, list[int]]]:
     """Run all tests with coverage collection using dynamic contexts.
@@ -2831,6 +2869,10 @@ def _run_tests_with_coverage(
             and the pre-scan would otherwise record nothing (issue #502).  The xdist
             plugin itself stays loaded: without ``-n`` it runs in-process, so its
             fixtures and hooks still work.
+        rerun_options: pytest-rerunfailures options from the command line (see
+            :func:`~pytest_gremlins.rerun_options.rerun_options_in`), appended so a test that flakes
+            before reaching the code under test is rerun, as in the baseline, and still lands in the
+            coverage map.
         timeout: Seconds the pre-scan subprocess may run (default 120).
 
     Returns:
@@ -2873,6 +2915,7 @@ def _run_tests_with_coverage(
         f'addopts={addopts_without_gremlins(addopts_without_xdist(preserved_addopts))}',
         '--tb=no',
         '-q',
+        *rerun_options,
     ]
 
     try:
@@ -2962,6 +3005,7 @@ def _run_batch_mutation_testing(  # pragma: no cover
         gremlin_session.instrumented_dir,
         gremlin_session.preserved_addopts,
         xdist_loaded=gremlin_session.xdist_loaded,
+        rerun_options=gremlin_session.rerun_options,
     )
     gremlins = gremlin_session.gremlins
 
@@ -3079,6 +3123,7 @@ def _run_parallel_mutation_testing(  # pragma: no cover
         gremlin_session.instrumented_dir,
         gremlin_session.preserved_addopts,
         xdist_loaded=gremlin_session.xdist_loaded,
+        rerun_options=gremlin_session.rerun_options,
     )
     gremlins = gremlin_session.gremlins
 
@@ -3415,6 +3460,7 @@ def _run_mutation_testing(
         gremlin_session.instrumented_dir,
         gremlin_session.preserved_addopts,
         xdist_loaded=gremlin_session.xdist_loaded,
+        rerun_options=gremlin_session.rerun_options,
     )
 
     for i, gremlin in enumerate(gremlin_session.gremlins, 1):
@@ -3836,6 +3882,7 @@ def _build_test_command(
     preserved_addopts: str = '',
     *,
     xdist_loaded: bool = False,
+    rerun_options: Sequence[str] = (),
 ) -> list[str]:
     """Build the command to run tests.
 
@@ -3861,6 +3908,10 @@ def _build_test_command(
             token stripper does not recognise) can distribute the run.  xdist itself stays
             loaded, so ``worker_id`` still works.  Without xdist the flag would be rejected as
             unrecognized, so it is omitted.
+        rerun_options: pytest-rerunfailures options typed on the command line (see
+            :func:`~pytest_gremlins.rerun_options.rerun_options_in`), appended last so they win over
+            ``addopts`` as they do in the baseline run.  A flaky test then has to fail on every
+            attempt before it can zap a gremlin (issue #546).
 
     Returns:
         Command list to run tests.
@@ -3894,6 +3945,8 @@ def _build_test_command(
 
     if xdist_loaded:
         command.extend(['-n', '0'])
+
+    command.extend(rerun_options)
 
     return command
 
