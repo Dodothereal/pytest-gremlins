@@ -1718,6 +1718,7 @@ instrumented code with mutation switching logic, then runs pytest.
 import json
 import os
 import sys
+import traceback
 
 __ORIGIN_FINDER_SOURCE__
 
@@ -1728,7 +1729,7 @@ def main():
     sources_file = os.environ.get('PYTEST_GREMLINS_SOURCES_FILE')
     if not sources_file:
         print('Error: PYTEST_GREMLINS_SOURCES_FILE not set', file=sys.stderr)
-        sys.exit(1)
+        sys.exit(__USAGE_ERROR_EXIT_CODE__)
 
     with open(sources_file, encoding='utf-8') as f:
         instrumented_sources = json.load(f)
@@ -1736,7 +1737,9 @@ def main():
     # Serve each instrumented file under whatever name the import system resolves it to.
     finder = install(instrumented_sources)
 
-    # Now run pytest with remaining arguments
+    # Now run pytest with remaining arguments. pytest is imported only now: its own imports (pluggy,
+    # iniconfig, pygments) must be served by the finder installed above, or a project mutating one of
+    # them would run unmutated.
     import pytest
     from _pytest.config import ConftestImportFailure
 
@@ -1804,10 +1807,29 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    # An exception that escapes main (a plugin that cannot register, a corrupt sources file, a hook that raises
+    # after the tests ran) would end the interpreter with exit 1, the code for a failing test, and score the
+    # mutant as caught although no test failed. Exit with pytest's internal-error code instead; SystemExit and
+    # KeyboardInterrupt pass through.
+    # pytest.fail and pytest.skip raise BaseException subclasses, so the guard catches BaseException. The
+    # parent keeps only the first 2000 characters of stderr, so a one-line cause comes before the traceback.
+    try:
+        main()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException as error:
+        cause = ''.join(traceback.format_exception_only(type(error), error)).strip()
+        print(
+            f'pytest-gremlins: the gremlin subprocess crashed outside a test, so pytest did not finish: {cause[:500]}',
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        sys.exit(__INTERNAL_ERROR_EXIT_CODE__)
 """
     return (
         script.replace('__COLLECTION_FAILED_EXIT_CODE__', str(GREMLIN_COLLECTION_FAILED_EXIT_CODE))
+        .replace('__USAGE_ERROR_EXIT_CODE__', str(int(pytest.ExitCode.USAGE_ERROR)))
+        .replace('__INTERNAL_ERROR_EXIT_CODE__', str(int(pytest.ExitCode.INTERNAL_ERROR)))
         .replace('__UNATTRIBUTABLE_MARKER__', UNATTRIBUTABLE_MARKER)
         .replace('__ORIGIN_FINDER_SOURCE__', inspect.getsource(origin_finder))
         .replace('__NODE_ID_ARGS_SOURCE__', inspect.getsource(node_id_args))
