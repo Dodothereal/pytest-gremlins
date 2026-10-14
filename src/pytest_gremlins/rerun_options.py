@@ -26,9 +26,12 @@ from collections.abc import (
     Sequence,
 )
 import locale
+import math
 from pathlib import Path
 import re
 import sys
+
+from pytest_gremlins.config import MAX_TIMEOUT_SECONDS
 
 _ARGUMENT_FILE_PREFIX = '@'
 
@@ -422,3 +425,84 @@ def baseline_rerun_warning(rerun_test_ids: Collection[str]) -> str | None:
         'Gremlin runs use the same rerun settings, so a gremlin is zapped only if these tests fail on every attempt; '
         'fix the flaky tests so your mutation score reflects your tests, not luck'
     )
+
+
+def scaled_mutant_timeout(base: int, *, reruns: int, reruns_delay: float) -> int:
+    """Return the per-mutant timeout widened to cover the reruns pytest-rerunfailures may make (issue #655).
+
+    ``base`` is the budget of one attempt.  A killed mutant's covering test fails, is rerun ``reruns`` times
+    and sleeps ``reruns_delay`` seconds before each rerun, so the run may need
+    ``base * (reruns + 1) + ceil(reruns * reruns_delay)`` seconds before the mutant is judged.
+    A negative or NaN delay counts as 0 (pytest-rerunfailures treats a negative one as 0).  No reruns leave
+    ``base`` unchanged.  The result never exceeds ``MAX_TIMEOUT_SECONDS``.
+
+    Args:
+        base: Seconds one attempt may take.
+        reruns: Reruns allowed per test; zero or less means none.
+        reruns_delay: Seconds slept before each rerun.
+
+    Returns:
+        The timeout in whole seconds.
+
+    Example:
+        >>> scaled_mutant_timeout(30, reruns=2, reruns_delay=20)
+        130
+        >>> scaled_mutant_timeout(30, reruns=0, reruns_delay=20)
+        30
+    """
+    if reruns <= 0:
+        return base
+    if reruns >= MAX_TIMEOUT_SECONDS:
+        return MAX_TIMEOUT_SECONDS
+    usable_delay = reruns_delay if reruns_delay > 0 else 0.0
+    total_delay = reruns * usable_delay
+    if total_delay >= MAX_TIMEOUT_SECONDS:
+        return MAX_TIMEOUT_SECONDS
+    return min(base * (reruns + 1) + math.ceil(total_delay), MAX_TIMEOUT_SECONDS)
+
+
+def session_rerun_budget(option: object, read_ini: Callable[[str], object]) -> tuple[int, float]:
+    """Return the ``(reruns, reruns_delay)`` pytest-rerunfailures applies to a test with no ``flaky`` marker.
+
+    This mirrors the plugin's own session-level reading: ``--force-reruns`` replaces the count outright;
+    otherwise the ``--reruns`` option wins over the ``reruns`` ini key.  ``--reruns-delay`` wins over the
+    ``reruns_delay`` ini key.  An ini value that is not a number, an ini key the installed plugin does not
+    register, and an unset setting all count as no reruns and no delay.  A ``flaky`` marker on a test
+    is not visible here and is not accounted for.
+
+    Args:
+        option: The parsed options, such as ``config.option``.
+        read_ini: Reads an ini key as a string, such as ``config.getini``.
+
+    Returns:
+        The rerun count (0 when none) and the delay in seconds before each rerun (0.0 when none).
+
+    Example:
+        >>> from types import SimpleNamespace
+        >>> session_rerun_budget(SimpleNamespace(reruns=None, reruns_delay=None), {'reruns': '2'}.get)
+        (2, 0.0)
+        >>> session_rerun_budget(SimpleNamespace(force_reruns=3, reruns_delay=1.5), {}.get)
+        (3, 1.5)
+    """
+    return _session_reruns(option, read_ini), _session_reruns_delay(option, read_ini)
+
+
+def _session_reruns(option: object, read_ini: Callable[[str], object]) -> int:
+    for from_option in (getattr(option, 'force_reruns', None), getattr(option, 'reruns', None)):
+        if from_option is not None:
+            return int(from_option)
+    return int(_read_number(read_ini, 'reruns', int))
+
+
+def _session_reruns_delay(option: object, read_ini: Callable[[str], object]) -> float:
+    from_option = getattr(option, 'reruns_delay', None)
+    if from_option is not None:
+        return float(from_option)
+    return float(_read_number(read_ini, 'reruns_delay', float))
+
+
+def _read_number(read_ini: Callable[[str], object], key: str, parse: Callable[[str], float]) -> float:
+    try:
+        return parse(str(read_ini(key)))
+    except (TypeError, ValueError):
+        return 0

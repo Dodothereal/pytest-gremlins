@@ -127,6 +127,8 @@ from pytest_gremlins.rerun_options import (
     rerun_keys_set_in,
     rerun_options_in,
     rerun_resets,
+    scaled_mutant_timeout,
+    session_rerun_budget,
     unforwardable_rerun_keys,
     unforwarded_rerun_key_warning,
 )
@@ -289,7 +291,9 @@ class GremlinSession:
         coverage_timeout: Seconds the coverage pre-scan may run before it is
             abandoned and coverage-guided test selection is disabled (issue #503).
         mutant_timeout: Seconds one gremlin's test run may take before the gremlin
-            is reported as a timeout.
+            is reported as a timeout.  This is the configured limit already scaled by the
+            session's pytest-rerunfailures budget (issue #655), so the timeout warning and the
+            cache key see the effective value.
         terminal_notices: Lines for the terminal summary, written directly rather than through
             ``logging`` (which pytest captures) or ``warnings.warn`` (which ``filterwarnings = error``
             turns into a crash).  Add one with :func:`_queue_terminal_notice`.
@@ -710,8 +714,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         dest='gremlin_mutant_timeout',
         help=(
-            "Seconds one gremlin's test run may take before the gremlin is reported as a timeout "
-            f'(default: {DEFAULT_MUTANT_TIMEOUT_SECONDS}, max: {MAX_TIMEOUT_SECONDS})'
+            "Seconds one attempt of a gremlin's test run may take before the gremlin is reported as a timeout "
+            f'(default: {DEFAULT_MUTANT_TIMEOUT_SECONDS}, max: {MAX_TIMEOUT_SECONDS}). '
+            'With pytest-rerunfailures active, each rerun adds another attempt plus the --reruns-delay wait: '
+            f'limit * (reruns + 1) + ceil(reruns * delay) seconds, capped at {MAX_TIMEOUT_SECONDS}'
         ),
     )
     group.addoption(
@@ -1071,7 +1077,9 @@ def pytest_configure(config: pytest.Config) -> None:
             rerun_options=_rerun_options_for(config),
             rerun_ini_warnings=_rerun_ini_warnings_for(config),
             coverage_timeout=coverage_timeout,
-            mutant_timeout=merged_config.mutant_timeout or DEFAULT_MUTANT_TIMEOUT_SECONDS,
+            mutant_timeout=_rerun_scaled_mutant_timeout(
+                config, merged_config.mutant_timeout or DEFAULT_MUTANT_TIMEOUT_SECONDS
+            ),
         ),
     )
 
@@ -2790,6 +2798,29 @@ def _rerun_options_for(config: pytest.Config) -> list[str]:
     )
     resets = rerun_resets(config.getini, overridden_by=command_line_options, option_keys_set=option_keys_set)
     return [*ini_overrides, *resets, *command_line_options]
+
+
+def _rerun_scaled_mutant_timeout(config: pytest.Config, per_run_timeout: int) -> int:
+    """Return ``per_run_timeout`` widened to the rerun budget of the session (issue #655).
+
+    A gremlin run inherits the session's pytest-rerunfailures settings, so a killed mutant's test is rerun
+    and, with ``--reruns-delay``, waits between attempts.  Without scaling, that alone would outlast the
+    timeout and the kill would be reported as a timeout or error.  The configured timeout is the budget of
+    one attempt; see :func:`~pytest_gremlins.rerun_options.scaled_mutant_timeout`.  Nothing is scaled when
+    pytest-rerunfailures is not loaded.
+    """
+    if not _rerunfailures_is_loaded(config):
+        return per_run_timeout
+    reruns, reruns_delay = session_rerun_budget(config.option, config.getini)
+    scaled_timeout = scaled_mutant_timeout(per_run_timeout, reruns=reruns, reruns_delay=reruns_delay)
+    logger.debug(
+        'Mutant timeout scaled for pytest-rerunfailures: %ds per attempt, reruns=%d, reruns_delay=%.1fs -> %ds',
+        per_run_timeout,
+        reruns,
+        reruns_delay,
+        scaled_timeout,
+    )
+    return scaled_timeout
 
 
 def _rerun_ini_warnings_for(config: pytest.Config) -> list[str]:
