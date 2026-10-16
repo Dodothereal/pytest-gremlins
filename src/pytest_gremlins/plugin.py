@@ -2757,6 +2757,8 @@ def _is_cov_addopt(token: str) -> bool:
 # Registered as ``rerunfailures`` when found through its entry point, as ``pytest_rerunfailures`` when loaded
 # by module name (``-p``, ``pytest_plugins``, or ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1``).
 _RERUNFAILURES_PLUGIN_NAMES = ('rerunfailures', 'pytest_rerunfailures')
+# Blocking by the entry-point name also blocks the plugin when it is loaded by module name.
+_BLOCK_RERUNFAILURES_OPTION = ('-p', 'no:rerunfailures')
 
 
 def _rerun_ini_settings_are_forwarded(config: pytest.Config) -> bool:
@@ -2790,9 +2792,14 @@ def _rerun_options_for(config: pytest.Config) -> list[str]:
     pytest-rerunfailures reads an option before its ini key.
     Settings are only forwarded when the plugin is loaded in this session, so a project without it
     never receives a flag its gremlin runs would reject as unrecognized (exit code 4).
+    A session without the plugin loaded forwards a block (``-p no:rerunfailures``), so gremlin runs, which do not
+    get the session's own ``-p no:rerunfailures`` or ``--disable-plugin-autoload``, do not autoload it and rerun
+    with ini settings the session's budget never assumed (issue #670).  Blocking a plugin that is not installed
+    is harmless.  A plugin that is loaded wins: ``-p no:pytest_rerunfailures`` blocks only the module name, the
+    entry-point plugin loads anyway, and the session's budget assumes reruns.
     """
     if not _rerunfailures_is_loaded(config):
-        return []
+        return list(_BLOCK_RERUNFAILURES_OPTION)
     command_line_options = _command_line_rerun_options(config)
     if not _rerun_ini_settings_are_forwarded(config):
         return command_line_options
