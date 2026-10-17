@@ -85,7 +85,7 @@ def _argparse_file_decoding() -> tuple[str, str]:
     return sys.getfilesystemencoding(), sys.getfilesystemencodeerrors()
 
 
-def _expand_argument_files(args: Sequence[str], base_dir: Path, files_being_read: tuple[Path, ...] = ()) -> list[str]:
+def expand_argument_files(args: Sequence[str], base_dir: Path, files_being_read: tuple[Path, ...] = ()) -> list[str]:
     """Replace each ``@file`` argument with the lines of that file, the way pytest's parser does.
 
     A file is decoded the way the running Python's argparse decodes it: with the locale encoding, strictly,
@@ -93,8 +93,10 @@ def _expand_argument_files(args: Sequence[str], base_dir: Path, files_being_read
     A file that cannot be read or decoded, or that is already being read further up (a cycle), contributes
     nothing.
     pytest itself rejects an unreadable ``@file`` as a usage error and recurses without end on a cycle,
-    so by the time this runs pytest has already read every file once; a read can fail here only if a
-    file changed after pytest parsed it.
+    so a file pytest read from ``base_dir`` can fail to read here only if it changed after pytest parsed it.
+    ``base_dir`` may differ from the directory pytest read from (the plugin passes the rootdir, while pytest
+    expanded from the session's current directory), so a read can also fail for that reason.
+    Either way the unreadable file is skipped.
     """
     expanded: list[str] = []
     for arg in args:
@@ -109,7 +111,7 @@ def _expand_argument_files(args: Sequence[str], base_dir: Path, files_being_read
             lines = argument_file.read_text(encoding=encoding, errors=errors).splitlines()
         except (OSError, UnicodeDecodeError):
             continue
-        expanded.extend(_expand_argument_files(lines, base_dir, (*files_being_read, argument_file)))
+        expanded.extend(expand_argument_files(lines, base_dir, (*files_being_read, argument_file)))
     return expanded
 
 
@@ -134,7 +136,7 @@ def rerun_options_in(args: Sequence[str], *, base_dir: Path | None = None) -> li
         >>> rerun_options_in(['-p', 'pytest_rerunfailures', '--reruns', '2'])
         ['--reruns=2']
     """
-    expanded = _expand_argument_files(args, base_dir or Path())
+    expanded = expand_argument_files(args, base_dir or Path())
     options: list[str] = []
     index = 0
     while index < len(expanded):

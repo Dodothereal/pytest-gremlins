@@ -125,6 +125,7 @@ from pytest_gremlins.reporting.results import (
 from pytest_gremlins.reporting.score import MutationScore
 from pytest_gremlins.rerun_options import (
     baseline_rerun_warning,
+    expand_argument_files,
     rerun_ini_overrides,
     rerun_keys_set_in,
     rerun_options_in,
@@ -2754,11 +2755,60 @@ def _is_cov_addopt(token: str) -> bool:
     return name in ('--cov', '--no-cov') or name.startswith(('--cov-', '--no-cov-'))
 
 
-# Registered as ``rerunfailures`` when found through its entry point, as ``pytest_rerunfailures`` when loaded
-# by module name (``-p``, ``pytest_plugins``, or ``PYTEST_DISABLE_PLUGIN_AUTOLOAD=1``).
+# Registered as ``rerunfailures`` when found through its entry point (autoload, or ``-p rerunfailures``, which
+# pytest resolves even with autoload disabled), as ``pytest_rerunfailures`` when loaded by module name
+# (``-p pytest_rerunfailures``, ``pytest_plugins`` or ``PYTEST_PLUGINS``).
 _RERUNFAILURES_PLUGIN_NAMES = ('rerunfailures', 'pytest_rerunfailures')
 # Blocking by the entry-point name also blocks the plugin when it is loaded by module name.
 _BLOCK_RERUNFAILURES_OPTION = ('-p', 'no:rerunfailures')
+_DISABLE_PLUGIN_AUTOLOAD_ENV_VAR = 'PYTEST_DISABLE_PLUGIN_AUTOLOAD'
+_DISABLE_PLUGIN_AUTOLOAD_FLAG = '--disable-plugin-autoload'
+
+
+def _arguments_gremlin_runs_inherit(config: pytest.Config) -> list[str]:
+    """Return the arguments gremlin runs get from the project's ``addopts`` and from ``PYTEST_ADDOPTS``.
+
+    The session's own command line is not among them: gremlin runs are given neither its flags nor its ``-p``.
+    ``@file`` arguments are expanded, as pytest does, against the directory gremlin runs start in, which is the
+    rootdir (not the directory the session was started from).  One that cannot be read contributes nothing
+    (pytest rejects an unreadable one as a usage error before this runs), which errs toward a missed loader and
+    so toward a missed kill rather than a false one.
+    """
+    try:
+        pytest_addopts_args = shlex.split(os.environ.get('PYTEST_ADDOPTS', ''))
+    except ValueError:
+        pytest_addopts_args = []
+    return expand_argument_files([*config.getini('addopts'), *pytest_addopts_args], base_dir=_get_rootdir(config))
+
+
+def _gremlin_runs_have_autoload_disabled(config: pytest.Config) -> bool:
+    """Return whether gremlin runs start with pytest's plugin autoload disabled.
+
+    They do when the environment they inherit sets the variable (pytest tests it for truthiness of the string),
+    or when the flag reaches them through ``addopts`` or ``PYTEST_ADDOPTS``.  A flag typed on the session's command
+    line does not reach them, so such a session's gremlin runs autoload their plugins.
+    """
+    return bool(os.environ.get(_DISABLE_PLUGIN_AUTOLOAD_ENV_VAR)) or (
+        _DISABLE_PLUGIN_AUTOLOAD_FLAG in _arguments_gremlin_runs_inherit(config)
+    )
+
+
+def _loader_options_for_gremlin_runs(config: pytest.Config, plugin_names: tuple[str, ...]) -> list[str]:
+    """Return the ``-p`` option that makes gremlin runs load the plugin this session registered.
+
+    Only for gremlin runs that start with autoload disabled (see :func:`_gremlin_runs_have_autoload_disabled`);
+    with autoload on they load the plugin through its entry point, and a loader of another name would register
+    the same module twice, which pluggy rejects.  The option repeats the name the session registered, so it is
+    skipped when ``addopts``, ``PYTEST_ADDOPTS``, ``PYTEST_PLUGINS`` or a conftest loads the plugin as well:
+    those reach the session too, which would have failed already had they used a different name.  The module
+    is registered under exactly one of ``plugin_names``: as the entry-point name for ``-p <entry point>``, which
+    pytest resolves even with autoload disabled, or as the module name for ``-p <module>``, ``pytest_plugins`` and
+    ``PYTEST_PLUGINS``.  Other plugins (pytest-cov, issue #657) can share this helper with their own names.
+    """
+    if not _gremlin_runs_have_autoload_disabled(config):
+        return []
+    registered_name = next((name for name in plugin_names if config.pluginmanager.hasplugin(name)), None)
+    return [] if registered_name is None else ['-p', registered_name]
 
 
 def _rerun_ini_settings_are_forwarded(config: pytest.Config) -> bool:
@@ -2797,9 +2847,19 @@ def _rerun_options_for(config: pytest.Config) -> list[str]:
     with ini settings the session's budget never assumed (issue #670).  Blocking a plugin that is not installed
     is harmless.  A plugin that is loaded wins: ``-p no:pytest_rerunfailures`` blocks only the module name, the
     entry-point plugin loads anyway, and the session's budget assumes reruns.
+    A session that loaded the plugin forwards a loader (``-p`` and the name it registered) first when gremlin
+    runs start with autoload disabled, by the environment or by a flag in ``addopts`` or ``PYTEST_ADDOPTS``
+    (see :func:`_loader_options_for_gremlin_runs`): without it they would not load a plugin the session got from its
+    command line, and would not rerun while the budget assumes they do (issue #679).
     """
     if not _rerunfailures_is_loaded(config):
         return list(_BLOCK_RERUNFAILURES_OPTION)
+    loader_options = _loader_options_for_gremlin_runs(config, _RERUNFAILURES_PLUGIN_NAMES)
+    return [*loader_options, *_rerun_settings_for(config)]
+
+
+def _rerun_settings_for(config: pytest.Config) -> list[str]:
+    """Return the rerun options and ini settings of a session that loaded pytest-rerunfailures."""
     command_line_options = _command_line_rerun_options(config)
     if not _rerun_ini_settings_are_forwarded(config):
         return command_line_options
