@@ -25,6 +25,7 @@ from collections.abc import (
     Collection,
     Sequence,
 )
+import json
 import locale
 import math
 from pathlib import Path
@@ -362,6 +363,33 @@ def rerun_resets(
     ]
 
 
+def rerun_ini_as_gremlin_runs_read(read_ini: Callable[[str], object], resets: Sequence[str]) -> Callable[[str], object]:
+    """Return ``read_ini`` as the gremlin runs see it: a key in ``resets`` reads as empty.
+
+    A reset (:func:`rerun_resets`) makes the gremlin runs ignore what the main session resolved for the key, so
+    the incremental cache must key on the empty value, not on the file's (issue #677).
+
+    Args:
+        read_ini: Reads an ini key as the main session resolved it, such as ``config.getini``.
+        resets: The ``--override-ini=key=`` arguments from :func:`rerun_resets`.
+
+    Returns:
+        A reader that gives ``''`` for each reset key and defers to ``read_ini`` for the rest.
+
+    Example:
+        >>> ini = {'rerun_except': ['xyz '], 'reruns': '2'}.get
+        >>> read = rerun_ini_as_gremlin_runs_read(ini, ['--override-ini=rerun_except='])
+        >>> read('rerun_except'), read('reruns')
+        ('', '2')
+    """
+    reset_keys = _keys_overridden_by(resets)
+
+    def read(key: str) -> object:
+        return '' if key in reset_keys else read_ini(key)
+
+    return read
+
+
 def unforwardable_rerun_keys(
     read_ini: Callable[[str], object], *, overridden_by: Sequence[str] = (), option_keys_set: Collection[str] = ()
 ) -> list[str]:
@@ -557,6 +585,58 @@ def session_rerun_backoff_factor(option: object, read_ini: Callable[[str], objec
     return _usable_backoff_factor(
         float(_read_number(read_ini, 'reruns_delay_backoff_factor', float, default=_NO_BACKOFF))
     )
+
+
+def rerun_cache_settings(option: object, read_ini: Callable[[str], object]) -> str:
+    """Return the rerun settings beyond the count and delay that can change a verdict, as one cache-key string.
+
+    The incremental cache keys a verdict on this (issue #677), because a run with ``--only-rerun ConnectionError``
+    zaps a gremlin that a run without the filter would rerun past.  The settings are read the way
+    pytest-rerunfailures reads them, not as the command line spelled them, so ``--only-rerun X`` and the
+    ``only_rerun = X`` ini key give equal strings: the backoff factor as :func:`session_rerun_backoff_factor`
+    resolves it, ``only_rerun`` and ``rerun_except`` from the option or else the ini key, and the options that
+    have no ini key (``--rerun-exclude-path``, ``--reruns-mode``, ``--max-suite-reruns``) from the option.
+    A filter or an exclusion is a set of patterns, so its order and repeats do not matter.  The count and delay
+    are keyed separately (:func:`session_rerun_budget`).
+
+    Args:
+        option: The parsed options, such as ``config.option``.
+        read_ini: Reads an ini key as the main session resolved it, such as ``config.getini``.
+
+    Returns:
+        A string that is equal for equal settings.
+
+    Example:
+        >>> from types import SimpleNamespace
+        >>> rerun_cache_settings(SimpleNamespace(only_rerun=['B', 'A']), {}.get) == rerun_cache_settings(
+        ...     SimpleNamespace(), {'only_rerun': ['A', 'B']}.get
+        ... )
+        True
+        >>> rerun_cache_settings(SimpleNamespace(), {}.get) == rerun_cache_settings(
+        ...     SimpleNamespace(max_suite_reruns=3), {}.get
+        ... )
+        False
+    """
+    settings = {
+        'backoff': session_rerun_backoff_factor(option, read_ini),
+        'only_rerun': _pattern_set(option, read_ini, 'only_rerun'),
+        'rerun_except': _pattern_set(option, read_ini, 'rerun_except'),
+        'exclude_path': _pattern_set(option, None, 'rerun_exclude_path'),
+        'mode': getattr(option, 'reruns_mode', None),
+        'max_suite_reruns': getattr(option, 'max_suite_reruns', None),
+    }
+    return json.dumps(settings, sort_keys=True)
+
+
+def _pattern_set(option: object, read_ini: Callable[[str], object] | None, name: str) -> list[str]:
+    """Return the sorted distinct patterns of ``name``: the option when it has any, else the ini key."""
+    patterns = getattr(option, name, None)
+    if not patterns and read_ini is not None:
+        try:
+            patterns = read_ini(name)
+        except (TypeError, ValueError):
+            patterns = None
+    return sorted({str(pattern) for pattern in patterns or ()})
 
 
 def _session_reruns(option: object, read_ini: Callable[[str], object]) -> int:
