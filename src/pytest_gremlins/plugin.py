@@ -1096,7 +1096,7 @@ def pytest_configure(config: pytest.Config) -> None:
             xdist_active=xdist_active,
             xdist_loaded=config.pluginmanager.hasplugin('xdist'),
             xdist_workers=xdist_worker_int if xdist_active else None,
-            preserved_addopts=_addopts_without_cov(config.getini('addopts')),
+            preserved_addopts=_addopts_for_gremlin_runs(config),
             rerun_options=_rerun_options_for(config),
             rerun_ini_warnings=_rerun_ini_warnings_for(config),
             coverage_timeout=_rerun_scaled_timeout(config, coverage_timeout, label='Coverage pre-scan'),
@@ -2880,6 +2880,57 @@ def _rerun_ini_settings_are_forwarded(config: pytest.Config) -> bool:
     return bool(getattr(config.option, 'inifilename', None))
 
 
+_DOCTEST_FLAG = '--doctest-modules'
+_DOCTEST_GLOB = '--doctest-glob'
+
+
+def _doctest_options_in(args: Sequence[str]) -> list[str]:
+    """Return the doctest collection options in ``args``, which decide whether a doctest node id exists (#594)."""
+    options: list[str] = []
+    tokens = iter(args)
+    for token in tokens:
+        if token == _DOCTEST_FLAG or token.startswith(f'{_DOCTEST_GLOB}='):
+            options.append(token)
+        elif token == _DOCTEST_GLOB:
+            glob = next(tokens, None)
+            if glob is not None:
+                options.extend([token, glob])
+    return options
+
+
+def _doctest_ini_overrides(config: pytest.Config) -> list[str]:
+    """Return ``-o`` overrides carrying the session's resolved doctest ini values (#594).
+
+    Gremlin runs re-read the project config, so a value set by ``-o`` or ``-c`` would be lost and a doctest that
+    needs it (``NORMALIZE_WHITESPACE``) would fail in every run, fabricating a kill for every gremlin it covers.
+    Resolving through ``getini`` covers ``-o``, ``-c`` and the project file alike.  The resolved value is always
+    forwarded, even an empty one, because a bare gremlin run would otherwise fall back to pytest's default
+    (``ELLIPSIS``).  The same values key the cache, since they decide whether a doctest passes.
+    """
+    overrides: list[str] = []
+    for key in ('doctest_optionflags', 'doctest_encoding'):
+        try:
+            value = config.getini(key)
+        except ValueError:
+            continue
+        text = ' '.join(value) if isinstance(value, list) else str(value)
+        overrides.extend(['-o', shlex.quote(f'{key}={text}')])
+    return overrides
+
+
+def _addopts_for_gremlin_runs(config: pytest.Config) -> str:
+    """Return the ``addopts`` for gremlin runs: the project's, minus pytest-cov, plus the session's doctest settings.
+
+    A doctest node id such as ``sample.py::sample.classify`` only resolves where doctests are collected, and
+    ``--doctest-modules`` typed on the command line is otherwise lost, because gremlin runs replace ``addopts``.
+    The doctest ini values are forwarded too (see :func:`_doctest_ini_overrides`).
+    Options inside an ``@argfile`` are not expanded.
+    """
+    project_addopts = _addopts_without_cov(config.getini('addopts'))
+    doctest_options = ' '.join(shlex.quote(option) for option in _doctest_options_in(config.invocation_params.args))
+    return ' '.join(part for part in (project_addopts, doctest_options, *_doctest_ini_overrides(config)) if part)
+
+
 def _command_line_rerun_options(config: pytest.Config) -> list[str]:
     """Return the rerun options in the session's invocation arguments, ``@file`` arguments expanded."""
     return rerun_options_in(config.invocation_params.args, base_dir=config.invocation_params.dir)
@@ -2953,16 +3004,18 @@ def _gremlin_run_rerun_backoff_factor(config: pytest.Config) -> float:
 
 
 def _gremlin_run_rerun_cache_settings(config: pytest.Config) -> str:
-    """Return the rerun settings beyond count and delay that the cache keys verdicts on, or none without the plugin.
+    """Return the settings beyond rerun count and delay that the cache keys verdicts on.
 
-    Without pytest-rerunfailures nothing reruns, so a stale ``only_rerun`` ini key must not split the cache (#677).
+    Rerun settings count only with pytest-rerunfailures loaded: otherwise nothing reruns, and a stale ``only_rerun``
+    ini key must not split the cache (#677).  The doctest ini settings are always part of it (#594).
     """
+    doctest_settings = ' '.join(_doctest_ini_overrides(config))
     if not _rerunfailures_is_loaded(config):
-        return ''
+        return doctest_settings
     read_ini: Callable[[str], object] = config.getini
     if _rerun_ini_settings_are_forwarded(config):
         read_ini = rerun_ini_as_gremlin_runs_read(read_ini, _rerun_ini_resolution_for(config).resets)
-    return rerun_cache_settings(config.option, read_ini)
+    return f'{rerun_cache_settings(config.option, read_ini)} {doctest_settings}'.strip()
 
 
 def _prescan_timeout(gremlin_session: GremlinSession) -> int:
