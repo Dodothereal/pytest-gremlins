@@ -197,7 +197,11 @@ The PR fails CI until the entry passes the release docs gate.
   outer code fence or HTML comment must be prose, a list line, a version heading or one of the five `###` headings.
   Every other line that starts with `#` fails, including `#Feature`, `####Detail`, `###Feature`, `#Feature ###`,
   `#\tFeature` and `##v2.0.0`; an issue-number continuation such as `  #720)` is the one exception, because it wraps
-  a reference inside a bullet.
+  a reference inside a bullet. It counts only while a list item is open directly above it: a standalone `    #720)`
+  renders as a heading and fails.
+- A raw `<h1>`-`<h6>` tag fails wherever it is visible, in any case and with attributes (`<H2 class="x">`), including
+  inside a block quote or a list item, because the renderer makes a real heading of it. A tag written as a code span
+  (`<h1>` in backticks) stays literal text.
 - Every thematic-break and setext-underline line fails anywhere in the entry: `=`, `===`, `-`, `--`, `---`, `***`,
   `___`, `* * *` and `- - -`. The check does not guess from the previous line; a delimiter under `A | B` or
   `<em>Feature</em>` fails for being a delimiter. The same heading and delimiter rules apply after list and `>`
