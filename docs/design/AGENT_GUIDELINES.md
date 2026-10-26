@@ -910,11 +910,12 @@ and `### Fix` must end with either a docs reference or an exemption:
 - The whole selected entry, including the preamble, `### Internal` and `### Documentation`, is read as a strict
   format. A visible line must be prose, a list line, a version heading or one of the five `###` headings. Every
   other line that starts with `#` fails, including `#Feature`, `####Detail`, `###Feature`, `#Feature ###`,
-  `#\tFeature` and `##v2.0.0`. An issue-number line such as `  #720)` is accepted only while a list item is open
-  directly above it; a standalone `    #720)` renders as a heading and fails.
-- Every thematic-break and setext-underline line fails anywhere in the entry: `=`, `===`, `-`, `--`, `---`, `***`,
-  `___`, `* * *` and `- - -`. The check does not guess from the previous line, so a delimiter under `A | B` or
-  `<em>Feature</em>` fails too. These rules apply again after list and `>` prefixes are stripped, which catches
+  `#\tFeature` and `##v2.0.0`. An issue-number line is the one exception: a `#720)` line indented by two spaces is
+  accepted only while a list item is open directly above it, and a standalone `#720)` indented by four spaces
+  renders as a heading and fails.
+- Every thematic-break and underline-style heading line fails anywhere in the entry: `=`, `===`, `-`, `--`, `---`,
+  `***`, `___`, `* * *` and `- - -`. The check does not guess from the previous line, so a delimiter under `A | B`
+  or `<em>Feature</em>` fails too. These rules apply again after list and `>` prefixes are stripped, which catches
   `> #Feature`, `- #### Detail`, `> <em>Feature</em>` + `> ---` and `- ---`.
 - A raw `<h1>`-`<h6>` tag fails wherever it is visible, in any case and with attributes (`<H2 class="x">`), inside
   a block quote or a list item included. A tag written as a code span (`<h1>` in backticks) stays literal text.
