@@ -6,6 +6,7 @@ to implement smart cache invalidation based on content changes.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import (
     TYPE_CHECKING,
@@ -232,6 +233,7 @@ class IncrementalCache:
     - optimize_level: the optimize level the gremlin subprocess compiled under
     - rerun_budget: the ``(reruns, reruns_delay)`` the gremlin runs were allowed
     - rerun_settings: the other resolved rerun settings (backoff factor, filters, mode, exclusions, suite cap)
+    - operators: the ordered module, qualified class name and name of each active operator
     - versions: ``CACHE_VERSION`` and operator-package versions (any change retires the whole cache)
     - RUNNER_FIDELITY_VERSION: execution-semantics marker, so verdicts from an older
       runner are recomputed once
@@ -260,15 +262,22 @@ class IncrementalCache:
 
         Args:
             cache_dir: Directory to store cache files.
-            operators: The operators registered for this run; the installed distributions that own them are
-                part of the cache key, so upgrading a package that supplies one retires its verdicts.
+            operators: The instantiated operators active for this run, in mutation order. Their identities
+                and owning installed distributions are part of the key, so skipping a failed constructor
+                cannot reuse verdicts for a different operator sequence.
             project_root: The pytest rootdir; operator modules under it are project code and add nothing.
         """
         self._cache_dir = cache_dir
         self._hasher = ContentHasher()
         self._store = ResultStore(cache_dir / 'results.db')
         self._store.delete_keys_not_ending_with(f':{RUNNER_FIDELITY_VERSION}')
-        self._versions_hash = self._hasher.hash_string(installed_versions_fingerprint(operators, project_root))
+        active_operators = tuple(operators)
+        # Sequential gremlin IDs depend on operator order, even when supplier versions match.
+        operator_identities = [
+            (type(operator).__module__, type(operator).__qualname__, operator.name) for operator in active_operators
+        ]
+        self._operators_hash = self._hasher.hash_string(json.dumps(operator_identities))
+        self._versions_hash = self._hasher.hash_string(installed_versions_fingerprint(active_operators, project_root))
         self._hits = 0
         self._misses = 0
 
@@ -314,7 +323,7 @@ class IncrementalCache:
         return (
             f'{gremlin_id}:{source_hash}:{combined_test_hash}'
             f':opt={optimize_level}:reruns={reruns}x{reruns_delay}:rr={rerun_settings}'
-            f':v={self._versions_hash}:{RUNNER_FIDELITY_VERSION}'
+            f':ops={self._operators_hash}:v={self._versions_hash}:{RUNNER_FIDELITY_VERSION}'
         )
 
     def get_cached_result(
